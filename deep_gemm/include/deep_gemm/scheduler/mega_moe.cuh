@@ -144,6 +144,10 @@ template <uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumSMs, uint32_t kNumRanks,
           uint32_t kNumRingBlocks,
           uint32_t kNumSharedExperts = 0,
+          uint32_t SHARED_L1_SHAPE_N = L1_SHAPE_N * kNumSharedExperts,
+          uint32_t SHARED_L1_SHAPE_K = L1_SHAPE_K,
+          uint32_t SHARED_L2_SHAPE_N = L2_SHAPE_N,
+          uint32_t SHARED_L2_SHAPE_K = L2_SHAPE_K * kNumSharedExperts,
           uint32_t SHARED_BLOCK_K = BLOCK_K,
           uint32_t kNumExpertsPerLane = math::constexpr_ceil_div(kNumExpertsPerRank, 32u),
           uint32_t kNumL1BlockNs = L1_SHAPE_N / BLOCK_N,
@@ -152,10 +156,6 @@ template <uint32_t BLOCK_M, uint32_t BLOCK_N, uint32_t BLOCK_K,
           uint32_t kNumL2Clusters = kNumL2BlockNs / 2>
 struct MegaMoEScheduler {
     static constexpr bool kHasShared = kNumSharedExperts > 0;
-    static constexpr uint32_t SHARED_L1_SHAPE_N = L1_SHAPE_N * kNumSharedExperts;
-    static constexpr uint32_t SHARED_L1_SHAPE_K = L1_SHAPE_K;
-    static constexpr uint32_t SHARED_L2_SHAPE_N = L2_SHAPE_N;
-    static constexpr uint32_t SHARED_L2_SHAPE_K = L2_SHAPE_K * kNumSharedExperts;
     using task_info_t = TaskInfo<kHasShared>;
 
     DG_STATIC_ASSERT(L1_SHAPE_N % (BLOCK_N * 2) == 0, "Invalid shape");
