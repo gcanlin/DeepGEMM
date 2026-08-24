@@ -288,7 +288,47 @@ def fp8_fp4_mega_moe_bf16_shared(
         sym_buffer.num_max_tokens_per_rank,
         sym_buffer.num_experts, sym_buffer.num_topk,
         recipe, activation, fast_math,
-        situ_beta, situ_linear_beta
+        situ_beta, situ_linear_beta,
+        None, None, None
+    )
+
+
+def fp8_fp4_mega_moe_bf16_shared_rs(
+        y: torch.Tensor,
+        l1_weights: Tuple[torch.Tensor, torch.Tensor],
+        l2_weights: Tuple[torch.Tensor, torch.Tensor],
+        shared_x: torch.Tensor,
+        shared_l1_weights: torch.Tensor,
+        shared_l2_weights: torch.Tensor,
+        rms_weight: torch.Tensor,
+        rms_epsilon: float,
+        shared_rs_workspace: torch.Tensor,
+        shared_rs_flags: torch.Tensor,
+        shared_rs_peer_ptrs: torch.Tensor,
+        sym_buffer: SymmBuffer,
+        cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+        recipe: Tuple[int, int, int] = (1, 1, 32),
+        activation: str = 'situ',
+        fast_math: bool = True,
+        situ_beta: Optional[float] = None,
+        situ_linear_beta: Optional[float] = None):
+    """Publish BF16 shared outputs into a symmetric ReduceScatter buffer."""
+    assert sym_buffer.shared_bf16_l2_acts is not None, \
+        'SymmBuffer was not initialized with a BF16 shared intermediate'
+    _C.fp8_fp4_mega_moe_bf16_shared(
+        y, None,
+        l1_weights, l2_weights,
+        shared_x, sym_buffer.shared_bf16_l2_acts,
+        shared_l1_weights, shared_l2_weights,
+        rms_weight, rms_epsilon,
+        cumulative_local_expert_recv_stats,
+        sym_buffer.buffer,
+        sym_buffer.handle.buffer_ptrs, sym_buffer.group.rank(),
+        sym_buffer.num_max_tokens_per_rank,
+        sym_buffer.num_experts, sym_buffer.num_topk,
+        recipe, activation, fast_math,
+        situ_beta, situ_linear_beta,
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs
     )
 
 

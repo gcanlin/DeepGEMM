@@ -28,12 +28,14 @@ public:
         bool use_situ;
         float situ_beta, situ_linear_beta;
         int shared_hidden, shared_intermediate_hidden;
-        bool use_bf16_shared, apply_rms_norm;
+        bool use_bf16_shared, apply_rms_norm, publish_shared_rs;
         MegaMoEConfig config;
 
         // Runtime arguments
         void* y;
         void* shared_y;
+        const uint32_t* shared_rs_flags;
+        const int64_t* shared_rs_peer_ptrs;
         const void* rms_weight;
         float rms_epsilon;
         int* cumulative_local_expert_recv_stats;
@@ -91,7 +93,7 @@ static void __instantiate_kernel() {{
         {},
         {},
         {}, {},
-        {}, {}
+        {}, {}, {}
     >);
 }};
 )", args.num_max_tokens_per_rank,
@@ -113,7 +115,8 @@ static void __instantiate_kernel() {{
     to_string(args.situ_beta), to_string(args.situ_linear_beta),
     args.shared_hidden, args.shared_intermediate_hidden,
     args.use_bf16_shared ? "true" : "false",
-    args.apply_rms_norm ? "true" : "false");
+    args.apply_rms_norm ? "true" : "false",
+    args.publish_shared_rs ? "true" : "false");
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -121,6 +124,8 @@ static void __instantiate_kernel() {{
         DG_CUDA_UNIFIED_CHECK(launch_kernel(kernel, config,
             args.y,
             args.shared_y,
+            args.shared_rs_flags,
+            args.shared_rs_peer_ptrs,
             args.rms_weight,
             args.rms_epsilon,
             args.cumulative_local_expert_recv_stats,
@@ -178,7 +183,10 @@ static void sm100_fp8_fp4_mega_moe(
     const torch::Tensor& rms_weight = torch::Tensor(),
     const float& rms_epsilon = 0.0f,
     const bool& use_bf16_shared = false,
-    const bool& apply_rms_norm = false
+    const bool& apply_rms_norm = false,
+    const torch::Tensor& shared_rs_flags = torch::Tensor(),
+    const torch::Tensor& shared_rs_peer_ptrs = torch::Tensor(),
+    const bool& publish_shared_rs = false
 ) {
     const auto num_ranks = static_cast<int>(sym_buffer_ptrs.size());
     const auto num_experts = num_experts_per_rank * num_ranks;
@@ -334,9 +342,14 @@ static void sm100_fp8_fp4_mega_moe(
         .shared_intermediate_hidden = shared_intermediate_hidden,
         .use_bf16_shared = use_bf16_shared,
         .apply_rms_norm = apply_rms_norm,
+        .publish_shared_rs = publish_shared_rs,
         .config = config,
         .y = y.data_ptr(),
-        .shared_y = use_bf16_shared ? bf16_shared_y.data_ptr() : nullptr,
+        .shared_y = use_bf16_shared and not publish_shared_rs ? bf16_shared_y.data_ptr() : nullptr,
+        .shared_rs_flags = publish_shared_rs ?
+            reinterpret_cast<const uint32_t*>(shared_rs_flags.data_ptr<int32_t>()) : nullptr,
+        .shared_rs_peer_ptrs = publish_shared_rs ?
+            shared_rs_peer_ptrs.data_ptr<int64_t>() : nullptr,
         .rms_weight = apply_rms_norm ? rms_weight.data_ptr() : nullptr,
         .rms_epsilon = rms_epsilon,
         .cumulative_local_expert_recv_stats = cumulative_local_expert_recv_stats_ptr,

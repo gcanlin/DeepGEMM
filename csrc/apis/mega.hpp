@@ -516,7 +516,7 @@ static void fp4_fp4_mega_moe(
 
 static void fp8_fp4_mega_moe_bf16_shared(
     const torch::Tensor& y,
-    const torch::Tensor& shared_y,
+    const std::optional<torch::Tensor>& shared_y_opt,
     const std::tuple<torch::Tensor, torch::Tensor>& l1_weights_tuple,
     const std::tuple<torch::Tensor, torch::Tensor>& l2_weights_tuple,
     const torch::Tensor& shared_x,
@@ -534,7 +534,10 @@ static void fp8_fp4_mega_moe_bf16_shared(
     const std::string& activation,
     const bool& fast_math,
     const std::optional<float>& situ_beta_opt,
-    const std::optional<float>& situ_linear_beta_opt
+    const std::optional<float>& situ_linear_beta_opt,
+    const std::optional<torch::Tensor>& shared_rs_workspace_opt,
+    const std::optional<torch::Tensor>& shared_rs_flags_opt,
+    const std::optional<torch::Tensor>& shared_rs_peer_ptrs_opt
 ) {
     const auto [l1_weights, l1_weights_sf] = l1_weights_tuple;
     const auto [l2_weights, l2_weights_sf] = l2_weights_tuple;
@@ -576,8 +579,40 @@ static void fp8_fp4_mega_moe_bf16_shared(
     DG_HOST_ASSERT(shared_x.is_cuda() and shared_x.scalar_type() == torch::kBFloat16 and shared_x.is_contiguous());
     DG_HOST_ASSERT(shared_x.dim() == 2 and shared_x.size(0) >= num_tokens);
     const auto shared_hidden = static_cast<int>(shared_x.size(1));
-    DG_HOST_ASSERT(shared_y.is_cuda() and shared_y.scalar_type() == torch::kBFloat16 and shared_y.is_contiguous());
-    DG_HOST_ASSERT(shared_y.dim() == 2 and shared_y.size(0) == num_tokens and shared_y.size(1) == shared_hidden);
+    const auto publish_shared_rs = shared_rs_workspace_opt.has_value();
+    DG_HOST_ASSERT(publish_shared_rs == shared_rs_flags_opt.has_value());
+    DG_HOST_ASSERT(publish_shared_rs == shared_rs_peer_ptrs_opt.has_value());
+    DG_HOST_ASSERT(publish_shared_rs != shared_y_opt.has_value());
+    torch::Tensor shared_y;
+    torch::Tensor shared_rs_workspace;
+    torch::Tensor shared_rs_flags;
+    torch::Tensor shared_rs_peer_ptrs;
+    if (publish_shared_rs) {
+        shared_rs_workspace = shared_rs_workspace_opt.value();
+        shared_rs_flags = shared_rs_flags_opt.value();
+        shared_rs_peer_ptrs = shared_rs_peer_ptrs_opt.value();
+        DG_HOST_ASSERT(shared_hidden % static_cast<int>(sym_buffer_ptrs.size()) == 0);
+        DG_HOST_ASSERT(shared_rs_workspace.is_cuda());
+        DG_HOST_ASSERT(shared_rs_workspace.scalar_type() == torch::kBFloat16);
+        DG_HOST_ASSERT(shared_rs_workspace.is_contiguous());
+        DG_HOST_ASSERT(shared_rs_workspace.dim() == 4);
+        DG_HOST_ASSERT(shared_rs_workspace.size(0) >= 3);
+        DG_HOST_ASSERT(shared_rs_workspace.size(1) >= num_tokens);
+        DG_HOST_ASSERT(shared_rs_workspace.size(2) == static_cast<int64_t>(sym_buffer_ptrs.size()));
+        DG_HOST_ASSERT(shared_rs_workspace.size(3) * shared_rs_workspace.size(2) == shared_hidden);
+        DG_HOST_ASSERT(shared_rs_flags.is_cuda());
+        DG_HOST_ASSERT(shared_rs_flags.scalar_type() == torch::kInt);
+        DG_HOST_ASSERT(shared_rs_flags.is_contiguous() and shared_rs_flags.numel() >= 9);
+        DG_HOST_ASSERT(shared_rs_peer_ptrs.is_cuda());
+        DG_HOST_ASSERT(shared_rs_peer_ptrs.scalar_type() == torch::kInt64);
+        DG_HOST_ASSERT(shared_rs_peer_ptrs.is_contiguous());
+        DG_HOST_ASSERT(shared_rs_peer_ptrs.dim() == 1);
+        DG_HOST_ASSERT(shared_rs_peer_ptrs.numel() == static_cast<int64_t>(sym_buffer_ptrs.size()));
+    } else {
+        shared_y = shared_y_opt.value();
+        DG_HOST_ASSERT(shared_y.is_cuda() and shared_y.scalar_type() == torch::kBFloat16 and shared_y.is_contiguous());
+        DG_HOST_ASSERT(shared_y.dim() == 2 and shared_y.size(0) == num_tokens and shared_y.size(1) == shared_hidden);
+    }
     DG_HOST_ASSERT(shared_l2_acts.is_cuda() and shared_l2_acts.scalar_type() == torch::kBFloat16 and shared_l2_acts.is_contiguous());
     DG_HOST_ASSERT(shared_l2_acts.dim() == 2 and shared_l2_acts.size(0) >= num_tokens);
     const auto shared_intermediate_hidden = static_cast<int>(shared_l2_acts.size(1));
@@ -597,7 +632,11 @@ static void fp8_fp4_mega_moe_bf16_shared(
     };
     DG_HOST_ASSERT(is_local_cuda_tensor(l1_weights) and is_local_cuda_tensor(l2_weights));
     DG_HOST_ASSERT(is_local_cuda_tensor(l1_weights_sf) and is_local_cuda_tensor(l2_weights_sf));
-    DG_HOST_ASSERT(is_local_cuda_tensor(shared_x) and is_local_cuda_tensor(shared_y));
+    DG_HOST_ASSERT(is_local_cuda_tensor(shared_x));
+    DG_HOST_ASSERT(publish_shared_rs ?
+        (is_local_cuda_tensor(shared_rs_workspace) and is_local_cuda_tensor(shared_rs_flags) and
+         is_local_cuda_tensor(shared_rs_peer_ptrs)) :
+        is_local_cuda_tensor(shared_y));
     DG_HOST_ASSERT(is_local_cuda_tensor(shared_l2_acts));
     DG_HOST_ASSERT(is_local_cuda_tensor(shared_l1_weights) and is_local_cuda_tensor(shared_l2_weights));
     DG_HOST_ASSERT(is_local_cuda_tensor(rms_weight) and is_local_cuda_tensor(sym_buffer));
@@ -647,7 +686,9 @@ static void fp8_fp4_mega_moe_bf16_shared(
             shared_l1_weights, shared_l2_weights,
             shared_y, rms_weight, rms_epsilon,
             /*use_bf16_shared=*/ true,
-            /*apply_rms_norm=*/ true);
+            /*apply_rms_norm=*/ true,
+            shared_rs_flags, shared_rs_peer_ptrs,
+            publish_shared_rs);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture");
     }

@@ -42,6 +42,7 @@ template <
     uint32_t kSharedIntermediateHidden,
     bool kUseBF16Shared,
     bool kApplyRMSNorm,
+    bool kPublishSharedRS,
     bool kHasShared = (kNumSharedExperts > 0),
     uint32_t L1_SHAPE_N = kIntermediateHidden * 2,
     uint32_t L1_SHAPE_K = kHidden,
@@ -62,6 +63,8 @@ template <
 CUTLASS_GLOBAL __launch_bounds__(kNumThreads, 1) void
 sm100_fp8_fp4_mega_moe_impl(void* y,
                             void* shared_y,
+                            const uint32_t* shared_rs_flags,
+                            const int64_t* shared_rs_peer_ptrs,
                             const void* rms_weight,
                             const float rms_epsilon,
                             int* cumulative_local_expert_recv_stats,
@@ -97,6 +100,10 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
     DG_STATIC_ASSERT(not kUseSiTU or (kSiTUBeta > 0 and kSiTULinearBeta > 0), "Invalid SiTU beta");
     DG_STATIC_ASSERT(not kUseBF16Shared or kNumSharedExperts > 0, "BF16 shared mode requires shared work");
     DG_STATIC_ASSERT(not kApplyRMSNorm or kUseBF16Shared, "Fused RMSNorm is only supported with BF16 shared mode");
+    DG_STATIC_ASSERT(not kPublishSharedRS or kUseBF16Shared, "Shared ReduceScatter publication requires BF16 shared mode");
+    DG_STATIC_ASSERT(not kPublishSharedRS or kSharedHidden % kNumRanks == 0, "Shared hidden must shard evenly across ranks");
+    DG_STATIC_ASSERT(not kPublishSharedRS or (kSharedHidden / kNumRanks) % 8 == 0,
+                     "Shared ReduceScatter shards must align to vector stores");
 
     // Thread indices
     const bool is_leader_cta = cute::block_rank_in_cluster() == 0;
@@ -1571,10 +1578,31 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
 
                         if constexpr (kUseBF16Shared) {
                             if (task_info.is_shared()) {
+                                void* shared_output_base = shared_y;
+                                uint64_t shared_output_offset = 0;
+                                uint64_t shared_column_offset = n_idx;
+                                if constexpr (kPublishSharedRS) {
+                                    const auto current_index = __ldg(shared_rs_flags);
+                                    const auto bytes_per_buffer = __ldg(shared_rs_flags + 2);
+                                    constexpr uint32_t kSharedShard =
+                                        kSharedHidden / kNumRanks;
+                                    const auto vector_n =
+                                        n_idx + (lane_idx % 16) * 8;
+                                    const auto destination_rank =
+                                        vector_n / kSharedShard;
+                                    shared_output_base = reinterpret_cast<void*>(
+                                        __ldg(shared_rs_peer_ptrs + destination_rank));
+                                    shared_output_offset =
+                                        static_cast<uint64_t>(current_index) * bytes_per_buffer
+                                        + static_cast<uint64_t>(sym_buffer.rank_idx) * kSharedShard
+                                              * sizeof(nv_bfloat16);
+                                    shared_column_offset = n_idx - destination_rank * kSharedShard;
+                                }
                                 const auto dst_ptr = math::advance_ptr<float4>(
-                                    shared_y,
-                                    static_cast<uint64_t>(dst_token_idx) * kSharedHidden * sizeof(nv_bfloat16)
-                                    + n_idx * sizeof(nv_bfloat16)
+                                    shared_output_base,
+                                    shared_output_offset
+                                    + static_cast<uint64_t>(dst_token_idx) * kSharedHidden * sizeof(nv_bfloat16)
+                                    + shared_column_offset * sizeof(nv_bfloat16)
                                     + (lane_idx % 16) * sizeof(float4));
                                 *dst_ptr = packed;
                                 continue;
