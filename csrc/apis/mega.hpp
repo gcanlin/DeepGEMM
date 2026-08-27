@@ -600,6 +600,8 @@ static void fp8_fp4_mega_moe_bf16_shared(
         DG_HOST_ASSERT(shared_rs_workspace.size(1) >= num_tokens);
         DG_HOST_ASSERT(shared_rs_workspace.size(2) == static_cast<int64_t>(sym_buffer_ptrs.size()));
         DG_HOST_ASSERT(shared_rs_workspace.size(3) * shared_rs_workspace.size(2) == shared_hidden);
+        // Cross-repository ABI with the ReduceScatter consumer: flags[0] is
+        // the generation index and flags[2] is the byte stride per generation.
         DG_HOST_ASSERT(shared_rs_flags.is_cuda());
         DG_HOST_ASSERT(shared_rs_flags.scalar_type() == torch::kInt);
         DG_HOST_ASSERT(shared_rs_flags.is_contiguous() and shared_rs_flags.numel() >= 9);

@@ -735,6 +735,8 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                 constexpr uint32_t kSharedL2ShapeK = kUseBF16Shared ?
                     kSharedIntermediateHidden : SHARED_L2_SHAPE_K;
                 const auto num_expected_blocks = (kSharedL2ShapeK / BLOCK_N) * 2;
+                // The counter is monotonic and another shared task may advance
+                // it past this task's readiness threshold before we observe it.
                 while (ptx::ld_acq(ptr) < num_expected_blocks);
             }
 
@@ -1580,7 +1582,8 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                             if (task_info.is_shared()) {
                                 void* shared_output_base = shared_y;
                                 uint64_t shared_output_offset = 0;
-                                uint64_t shared_column_offset = n_idx;
+                                uint64_t shared_column_offset =
+                                    n_idx + (lane_idx % 16) * 8;
                                 if constexpr (kPublishSharedRS) {
                                     const auto current_index = __ldg(shared_rs_flags);
                                     const auto bytes_per_buffer = __ldg(shared_rs_flags + 2);
@@ -1596,14 +1599,14 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                                         static_cast<uint64_t>(current_index) * bytes_per_buffer
                                         + static_cast<uint64_t>(sym_buffer.rank_idx) * kSharedShard
                                               * sizeof(nv_bfloat16);
-                                    shared_column_offset = n_idx - destination_rank * kSharedShard;
+                                    shared_column_offset =
+                                        vector_n - destination_rank * kSharedShard;
                                 }
                                 const auto dst_ptr = math::advance_ptr<float4>(
                                     shared_output_base,
                                     shared_output_offset
                                     + static_cast<uint64_t>(dst_token_idx) * kSharedHidden * sizeof(nv_bfloat16)
-                                    + shared_column_offset * sizeof(nv_bfloat16)
-                                    + (lane_idx % 16) * sizeof(float4));
+                                    + shared_column_offset * sizeof(nv_bfloat16));
                                 *dst_ptr = packed;
                                 continue;
                             }

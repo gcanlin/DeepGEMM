@@ -334,6 +334,45 @@ def _bf16_shared_worker(local_rank: int, master_port: int) -> None:
         if shared_error >= 1e-2:
             raise AssertionError(
                 f'BF16 shared expert relative L2 too high: {shared_error:.6f}')
+
+        shared_rs_workspace = torch.full(
+            (3, NUM_TOKENS, NUM_RANKS, SHARED_HIDDEN),
+            float('nan'),
+            dtype=torch.bfloat16,
+            device='cuda')
+        shared_rs_flags = torch.zeros(9, dtype=torch.int, device='cuda')
+        shared_rs_flags[2] = shared_rs_workspace[0].nbytes
+        shared_rs_peer_ptrs = torch.tensor(
+            [shared_rs_workspace.data_ptr()], dtype=torch.long, device='cuda')
+        for generation in range(3):
+            prepare_inputs()
+            routed_rs = torch.empty_like(routed_unnormalized)
+            shared_rs_flags[0] = generation
+            deep_gemm.fp8_fp4_mega_moe_bf16_shared_rs(
+                routed_rs,
+                transformed_routed_l1,
+                transformed_routed_l2,
+                shared_x,
+                transformed_shared_l1,
+                transformed_shared_l2,
+                rms_weight,
+                rms_epsilon,
+                shared_rs_workspace,
+                shared_rs_flags,
+                shared_rs_peer_ptrs,
+                buffer,
+                activation='situ',
+                situ_beta=situ_beta,
+                situ_linear_beta=situ_linear_beta)
+            torch.cuda.synchronize()
+            published = shared_rs_workspace[generation, :, 0]
+            if not torch.equal(published, shared_actual):
+                mismatch = torch.count_nonzero(
+                    published.view(torch.int16)
+                    != shared_actual.view(torch.int16)).item()
+                raise AssertionError(
+                    f'generation {generation} RS publication differs from '
+                    f'dense output in {mismatch} BF16 values')
     finally:
         if buffer is not None:
             buffer.destroy()

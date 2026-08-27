@@ -274,6 +274,10 @@ def fp8_fp4_mega_moe_bf16_shared(
         fast_math: bool = True,
         situ_beta: Optional[float] = None,
         situ_linear_beta: Optional[float] = None):
+    if sym_buffer.num_shared_experts != 0:
+        raise ValueError(
+            'BF16 shared MegaMoE requires num_shared_experts=0 because its '
+            'intermediate is stored outside the symmetric routed buffer')
     assert sym_buffer.shared_bf16_l2_acts is not None, \
         'SymmBuffer was not initialized with a BF16 shared intermediate'
     _C.fp8_fp4_mega_moe_bf16_shared(
@@ -312,7 +316,17 @@ def fp8_fp4_mega_moe_bf16_shared_rs(
         fast_math: bool = True,
         situ_beta: Optional[float] = None,
         situ_linear_beta: Optional[float] = None):
-    """Publish BF16 shared outputs into a symmetric ReduceScatter buffer."""
+    """Publish BF16 shared outputs into a symmetric ReduceScatter buffer.
+
+    ``shared_rs_flags[0]`` selects one of at least three workspace generations
+    and ``shared_rs_flags[2]`` is the byte stride between generations. This
+    kernel only writes the selected generation; the caller must make remote
+    stores visible and publish its own completion signal before consuming it.
+    """
+    if sym_buffer.num_shared_experts != 0:
+        raise ValueError(
+            'BF16 shared MegaMoE requires num_shared_experts=0 because its '
+            'intermediate is stored outside the symmetric routed buffer')
     assert sym_buffer.shared_bf16_l2_acts is not None, \
         'SymmBuffer was not initialized with a BF16 shared intermediate'
     _C.fp8_fp4_mega_moe_bf16_shared(
