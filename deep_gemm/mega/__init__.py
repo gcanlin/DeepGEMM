@@ -257,9 +257,9 @@ def fp4_fp4_mega_moe(y: torch.Tensor,
     )
 
 
-def fp8_fp4_mega_moe_bf16_shared(
+def _fp8_fp4_mega_moe_bf16_shared(
         y: torch.Tensor,
-        shared_y: torch.Tensor,
+        shared_y: Optional[torch.Tensor],
         l1_weights: Tuple[torch.Tensor, torch.Tensor],
         l2_weights: Tuple[torch.Tensor, torch.Tensor],
         shared_x: torch.Tensor,
@@ -268,6 +268,9 @@ def fp8_fp4_mega_moe_bf16_shared(
         rms_weight: torch.Tensor,
         rms_epsilon: float,
         sym_buffer: SymmBuffer,
+        shared_rs_workspace: Optional[torch.Tensor],
+        shared_rs_flags: Optional[torch.Tensor],
+        shared_rs_peer_ptrs: Optional[torch.Tensor],
         cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
         recipe: Tuple[int, int, int] = (1, 1, 32),
         activation: str = 'situ',
@@ -293,7 +296,37 @@ def fp8_fp4_mega_moe_bf16_shared(
         sym_buffer.num_experts, sym_buffer.num_topk,
         recipe, activation, fast_math,
         situ_beta, situ_linear_beta,
-        None, None, None
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs
+    )
+
+
+def fp8_fp4_mega_moe_bf16_shared(
+        y: torch.Tensor,
+        shared_y: torch.Tensor,
+        l1_weights: Tuple[torch.Tensor, torch.Tensor],
+        l2_weights: Tuple[torch.Tensor, torch.Tensor],
+        shared_x: torch.Tensor,
+        shared_l1_weights: torch.Tensor,
+        shared_l2_weights: torch.Tensor,
+        rms_weight: torch.Tensor,
+        rms_epsilon: float,
+        sym_buffer: SymmBuffer,
+        cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+        recipe: Tuple[int, int, int] = (1, 1, 32),
+        activation: str = 'situ',
+        fast_math: bool = True,
+        situ_beta: Optional[float] = None,
+        situ_linear_beta: Optional[float] = None):
+    _fp8_fp4_mega_moe_bf16_shared(
+        y, shared_y,
+        l1_weights, l2_weights,
+        shared_x, shared_l1_weights, shared_l2_weights,
+        rms_weight, rms_epsilon,
+        sym_buffer,
+        None, None, None,
+        cumulative_local_expert_recv_stats,
+        recipe, activation, fast_math,
+        situ_beta, situ_linear_beta
     )
 
 
@@ -323,26 +356,16 @@ def fp8_fp4_mega_moe_bf16_shared_rs(
     kernel only writes the selected generation; the caller must make remote
     stores visible and publish its own completion signal before consuming it.
     """
-    if sym_buffer.num_shared_experts != 0:
-        raise ValueError(
-            'BF16 shared MegaMoE requires num_shared_experts=0 because its '
-            'intermediate is stored outside the symmetric routed buffer')
-    assert sym_buffer.shared_bf16_l2_acts is not None, \
-        'SymmBuffer was not initialized with a BF16 shared intermediate'
-    _C.fp8_fp4_mega_moe_bf16_shared(
+    _fp8_fp4_mega_moe_bf16_shared(
         y, None,
         l1_weights, l2_weights,
-        shared_x, sym_buffer.shared_bf16_l2_acts,
-        shared_l1_weights, shared_l2_weights,
+        shared_x, shared_l1_weights, shared_l2_weights,
         rms_weight, rms_epsilon,
+        sym_buffer,
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs,
         cumulative_local_expert_recv_stats,
-        sym_buffer.buffer,
-        sym_buffer.handle.buffer_ptrs, sym_buffer.group.rank(),
-        sym_buffer.num_max_tokens_per_rank,
-        sym_buffer.num_experts, sym_buffer.num_topk,
         recipe, activation, fast_math,
-        situ_beta, situ_linear_beta,
-        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs
+        situ_beta, situ_linear_beta
     )
 
 

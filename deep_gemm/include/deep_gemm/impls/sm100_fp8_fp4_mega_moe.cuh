@@ -1585,6 +1585,9 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                                 uint64_t shared_column_offset =
                                     n_idx + (lane_idx % 16) * 8;
                                 if constexpr (kPublishSharedRS) {
+                                    // This path publishes payload only. The
+                                    // caller owns cross-rank visibility and
+                                    // completion signaling before consumption.
                                     const auto current_index = __ldg(shared_rs_flags);
                                     const auto bytes_per_buffer = __ldg(shared_rs_flags + 2);
                                     constexpr uint32_t kSharedShard =
