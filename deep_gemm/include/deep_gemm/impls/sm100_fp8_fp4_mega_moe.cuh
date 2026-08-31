@@ -43,6 +43,7 @@ template <
     bool kUseBF16Shared,
     bool kApplyRMSNorm,
     bool kPublishSharedRS,
+    bool kPublishSharedSPRS,
     bool kHasShared = (kNumSharedExperts > 0),
     uint32_t L1_SHAPE_N = kIntermediateHidden * 2,
     uint32_t L1_SHAPE_K = kHidden,
@@ -69,6 +70,7 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                             const float rms_epsilon,
                             int* cumulative_local_expert_recv_stats,
                             const uint32_t num_tokens,
+                            const uint32_t num_shared_tokens,
                             const __grid_constant__ layout::SymBuffer<kNumRanks> sym_buffer,
                             const __grid_constant__ cute::TmaDescriptor tensor_map_l1_acts,
                             const __grid_constant__ cute::TmaDescriptor tensor_map_l1_acts_sf,
@@ -101,8 +103,11 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
     DG_STATIC_ASSERT(not kUseBF16Shared or kNumSharedExperts > 0, "BF16 shared mode requires shared work");
     DG_STATIC_ASSERT(not kApplyRMSNorm or kUseBF16Shared, "Fused RMSNorm is only supported with BF16 shared mode");
     DG_STATIC_ASSERT(not kPublishSharedRS or kUseBF16Shared, "Shared ReduceScatter publication requires BF16 shared mode");
-    DG_STATIC_ASSERT(not kPublishSharedRS or kSharedHidden % kNumRanks == 0, "Shared hidden must shard evenly across ranks");
-    DG_STATIC_ASSERT(not kPublishSharedRS or (kSharedHidden / kNumRanks) % 8 == 0,
+    DG_STATIC_ASSERT(not kPublishSharedSPRS or kPublishSharedRS,
+                     "SP publication requires shared ReduceScatter publication");
+    DG_STATIC_ASSERT(not kPublishSharedRS or kPublishSharedSPRS or kSharedHidden % kNumRanks == 0,
+                     "Shared hidden must shard evenly across ranks");
+    DG_STATIC_ASSERT(not kPublishSharedRS or kPublishSharedSPRS or (kSharedHidden / kNumRanks) % 8 == 0,
                      "Shared ReduceScatter shards must align to vector stores");
 
     // Thread indices
@@ -1072,7 +1077,7 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
 
         // Do mainloop by the leader CTA
         if (is_leader_cta)
-            scheduler.mainloop(num_tokens);
+            scheduler.mainloop(num_tokens, num_shared_tokens);
     } else if (warp_idx >= kNumDispatchWarps + kNumMMANonEpilogueWarps) {
         // Adjust registers
         cutlass::arch::warpgroup_reg_alloc<kNumEpilogueRegisters>();
@@ -1582,6 +1587,7 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                             if (task_info.is_shared()) {
                                 void* shared_output_base = shared_y;
                                 uint64_t shared_output_offset = 0;
+                                uint32_t shared_output_row = dst_token_idx;
                                 uint64_t shared_column_offset =
                                     n_idx + (lane_idx % 16) * 8;
                                 if constexpr (kPublishSharedRS) {
@@ -1590,25 +1596,44 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
                                     // completion signaling before consumption.
                                     const auto current_index = __ldg(shared_rs_flags);
                                     const auto bytes_per_buffer = __ldg(shared_rs_flags + 2);
-                                    constexpr uint32_t kSharedShard =
-                                        kSharedHidden / kNumRanks;
                                     const auto vector_n =
                                         n_idx + (lane_idx % 16) * 8;
-                                    const auto destination_rank =
-                                        vector_n / kSharedShard;
-                                    shared_output_base = reinterpret_cast<void*>(
-                                        __ldg(shared_rs_peer_ptrs + destination_rank));
-                                    shared_output_offset =
-                                        static_cast<uint64_t>(current_index) * bytes_per_buffer
-                                        + static_cast<uint64_t>(sym_buffer.rank_idx) * kSharedShard
-                                              * sizeof(nv_bfloat16);
-                                    shared_column_offset =
-                                        vector_n - destination_rank * kSharedShard;
+                                    if constexpr (kPublishSharedSPRS) {
+                                        const auto tokens_per_rank =
+                                            num_shared_tokens / kNumRanks;
+                                        const auto destination_rank =
+                                            dst_token_idx / tokens_per_rank;
+                                        const auto destination_token =
+                                            dst_token_idx - destination_rank * tokens_per_rank;
+                                        shared_output_base = reinterpret_cast<void*>(
+                                            __ldg(shared_rs_peer_ptrs + destination_rank));
+                                        shared_output_offset =
+                                            static_cast<uint64_t>(current_index) * bytes_per_buffer
+                                            + static_cast<uint64_t>(sym_buffer.rank_idx)
+                                                  * kSharedHidden * sizeof(nv_bfloat16);
+                                        shared_output_row = destination_token;
+                                        shared_column_offset = vector_n;
+                                    } else {
+                                        constexpr uint32_t kSharedShard =
+                                            kSharedHidden / kNumRanks;
+                                        const auto destination_rank =
+                                            vector_n / kSharedShard;
+                                        shared_output_base = reinterpret_cast<void*>(
+                                            __ldg(shared_rs_peer_ptrs + destination_rank));
+                                        shared_output_offset =
+                                            static_cast<uint64_t>(current_index) * bytes_per_buffer
+                                            + static_cast<uint64_t>(sym_buffer.rank_idx) * kSharedShard
+                                                  * sizeof(nv_bfloat16);
+                                        shared_column_offset =
+                                            vector_n - destination_rank * kSharedShard;
+                                    }
                                 }
                                 const auto dst_ptr = math::advance_ptr<float4>(
                                     shared_output_base,
                                     shared_output_offset
-                                    + static_cast<uint64_t>(dst_token_idx) * kSharedHidden * sizeof(nv_bfloat16)
+                                    + static_cast<uint64_t>(shared_output_row)
+                                          * (kPublishSharedSPRS ? kNumRanks : 1)
+                                          * kSharedHidden * sizeof(nv_bfloat16)
                                     + shared_column_offset * sizeof(nv_bfloat16));
                                 *dst_ptr = packed;
                                 continue;

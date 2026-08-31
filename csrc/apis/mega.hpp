@@ -537,11 +537,13 @@ static void fp8_fp4_mega_moe_bf16_shared(
     const std::optional<float>& situ_linear_beta_opt,
     const std::optional<torch::Tensor>& shared_rs_workspace_opt,
     const std::optional<torch::Tensor>& shared_rs_flags_opt,
-    const std::optional<torch::Tensor>& shared_rs_peer_ptrs_opt
+    const std::optional<torch::Tensor>& shared_rs_peer_ptrs_opt,
+    const bool& publish_shared_sp_rs
 ) {
     const auto [l1_weights, l1_weights_sf] = l1_weights_tuple;
     const auto [l2_weights, l2_weights_sf] = l2_weights_tuple;
     const auto num_tokens = static_cast<int>(y.size(0));
+    const auto num_shared_tokens = static_cast<int>(shared_x.size(0));
     const auto [rm, rn, rk] = recipe;
     DG_HOST_ASSERT(rm == 1 and rn == 1 and rk == 32);
     DG_HOST_ASSERT(activation == "situ");
@@ -579,6 +581,7 @@ static void fp8_fp4_mega_moe_bf16_shared(
     DG_HOST_ASSERT(shared_x.is_cuda() and shared_x.scalar_type() == torch::kBFloat16 and shared_x.is_contiguous());
     DG_HOST_ASSERT(shared_x.dim() == 2 and shared_x.size(0) >= num_tokens);
     const auto shared_hidden = static_cast<int>(shared_x.size(1));
+    DG_HOST_ASSERT(num_shared_tokens <= num_max_tokens_per_rank);
     const auto publish_shared_rs = shared_rs_workspace_opt.has_value();
     DG_HOST_ASSERT(publish_shared_rs == shared_rs_flags_opt.has_value());
     DG_HOST_ASSERT(publish_shared_rs == shared_rs_peer_ptrs_opt.has_value());
@@ -591,15 +594,21 @@ static void fp8_fp4_mega_moe_bf16_shared(
         shared_rs_workspace = shared_rs_workspace_opt.value();
         shared_rs_flags = shared_rs_flags_opt.value();
         shared_rs_peer_ptrs = shared_rs_peer_ptrs_opt.value();
-        DG_HOST_ASSERT(shared_hidden % static_cast<int>(sym_buffer_ptrs.size()) == 0);
+        const auto num_ranks = static_cast<int>(sym_buffer_ptrs.size());
+        DG_HOST_ASSERT(not publish_shared_sp_rs or num_shared_tokens % num_ranks == 0);
+        DG_HOST_ASSERT(publish_shared_sp_rs or shared_hidden % num_ranks == 0);
         DG_HOST_ASSERT(shared_rs_workspace.is_cuda());
         DG_HOST_ASSERT(shared_rs_workspace.scalar_type() == torch::kBFloat16);
         DG_HOST_ASSERT(shared_rs_workspace.is_contiguous());
         DG_HOST_ASSERT(shared_rs_workspace.dim() == 4);
-        DG_HOST_ASSERT(shared_rs_workspace.size(0) >= 3);
-        DG_HOST_ASSERT(shared_rs_workspace.size(1) >= num_tokens);
+        DG_HOST_ASSERT(shared_rs_workspace.size(0) >=
+                       (publish_shared_sp_rs ? 1 : 3));
+        DG_HOST_ASSERT(shared_rs_workspace.size(1) >=
+                       (publish_shared_sp_rs ? num_shared_tokens / num_ranks : num_shared_tokens));
         DG_HOST_ASSERT(shared_rs_workspace.size(2) == static_cast<int64_t>(sym_buffer_ptrs.size()));
-        DG_HOST_ASSERT(shared_rs_workspace.size(3) * shared_rs_workspace.size(2) == shared_hidden);
+        DG_HOST_ASSERT(publish_shared_sp_rs ?
+            shared_rs_workspace.size(3) == shared_hidden :
+            shared_rs_workspace.size(3) * shared_rs_workspace.size(2) == shared_hidden);
         // Cross-repository ABI with the ReduceScatter consumer: flags[0] is
         // the generation index and flags[2] is the byte stride per generation.
         DG_HOST_ASSERT(shared_rs_flags.is_cuda());
@@ -613,10 +622,10 @@ static void fp8_fp4_mega_moe_bf16_shared(
     } else {
         shared_y = shared_y_opt.value();
         DG_HOST_ASSERT(shared_y.is_cuda() and shared_y.scalar_type() == torch::kBFloat16 and shared_y.is_contiguous());
-        DG_HOST_ASSERT(shared_y.dim() == 2 and shared_y.size(0) == num_tokens and shared_y.size(1) == shared_hidden);
+        DG_HOST_ASSERT(shared_y.dim() == 2 and shared_y.size(0) == num_shared_tokens and shared_y.size(1) == shared_hidden);
     }
     DG_HOST_ASSERT(shared_l2_acts.is_cuda() and shared_l2_acts.scalar_type() == torch::kBFloat16 and shared_l2_acts.is_contiguous());
-    DG_HOST_ASSERT(shared_l2_acts.dim() == 2 and shared_l2_acts.size(0) >= num_tokens);
+    DG_HOST_ASSERT(shared_l2_acts.dim() == 2 and shared_l2_acts.size(0) >= num_shared_tokens);
     const auto shared_intermediate_hidden = static_cast<int>(shared_l2_acts.size(1));
     DG_HOST_ASSERT(shared_intermediate_hidden > 0);
     DG_HOST_ASSERT(shared_l1_weights.is_cuda() and shared_l1_weights.scalar_type() == torch::kBFloat16 and shared_l1_weights.is_contiguous());
@@ -690,7 +699,7 @@ static void fp8_fp4_mega_moe_bf16_shared(
             /*use_bf16_shared=*/ true,
             /*apply_rms_norm=*/ true,
             shared_rs_flags, shared_rs_peer_ptrs,
-            publish_shared_rs);
+            publish_shared_rs, publish_shared_sp_rs);
     } else {
         DG_HOST_UNREACHABLE("Unsupported architecture");
     }

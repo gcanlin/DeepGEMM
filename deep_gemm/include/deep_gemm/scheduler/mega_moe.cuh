@@ -381,13 +381,14 @@ struct MegaMoEScheduler {
         }
     }
 
-    CUTLASS_DEVICE void mainloop(const uint32_t& num_tokens) {
+    CUTLASS_DEVICE void mainloop(const uint32_t& num_tokens,
+                                 const uint32_t& num_shared_tokens) {
         const auto lane_idx = ptx::get_lane_idx();
 
         if constexpr (kHasShared) {
             // Shared expert L1 tasks do not depend on dispatch.
             shared_mainloop<BlockPhase::SharedLinear1, SHARED_L1_SHAPE_N, SHARED_L1_SHAPE_K>(
-                num_tokens, lane_idx, workspace.get_shared_l1_task_count_ptr());
+                num_shared_tokens, lane_idx, workspace.get_shared_l1_task_count_ptr());
         }
 
         // Wait dispatch's results
@@ -406,7 +407,7 @@ struct MegaMoEScheduler {
         if constexpr (kHasShared) {
             // Shared expert L2 tasks depend on SharedLinear1 completion.
             shared_mainloop<BlockPhase::SharedLinear2, SHARED_L2_SHAPE_N, SHARED_L2_SHAPE_K>(
-                num_tokens, lane_idx, workspace.get_shared_l2_task_count_ptr());
+                num_shared_tokens, lane_idx, workspace.get_shared_l2_task_count_ptr());
         }
 
         // Sentinel.

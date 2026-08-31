@@ -15,6 +15,11 @@ except Exception as exception:
 from .. import _C
 
 
+def supports_bf16_shared_independent_tokens() -> bool:
+    """Return whether BF16 shared and routed work may use different M."""
+    return True
+
+
 class SymmBuffer:
     def __init__(self, group: dist.ProcessGroup,
                  num_experts: int,
@@ -271,6 +276,7 @@ def _fp8_fp4_mega_moe_bf16_shared(
         shared_rs_workspace: Optional[torch.Tensor],
         shared_rs_flags: Optional[torch.Tensor],
         shared_rs_peer_ptrs: Optional[torch.Tensor],
+        publish_shared_sp_rs: bool,
         cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
         recipe: Tuple[int, int, int] = (1, 1, 32),
         activation: str = 'situ',
@@ -296,7 +302,8 @@ def _fp8_fp4_mega_moe_bf16_shared(
         sym_buffer.num_experts, sym_buffer.num_topk,
         recipe, activation, fast_math,
         situ_beta, situ_linear_beta,
-        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs,
+        publish_shared_sp_rs
     )
 
 
@@ -323,7 +330,7 @@ def fp8_fp4_mega_moe_bf16_shared(
         shared_x, shared_l1_weights, shared_l2_weights,
         rms_weight, rms_epsilon,
         sym_buffer,
-        None, None, None,
+        None, None, None, False,
         cumulative_local_expert_recv_stats,
         recipe, activation, fast_math,
         situ_beta, situ_linear_beta
@@ -362,7 +369,40 @@ def fp8_fp4_mega_moe_bf16_shared_rs(
         shared_x, shared_l1_weights, shared_l2_weights,
         rms_weight, rms_epsilon,
         sym_buffer,
-        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs,
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs, False,
+        cumulative_local_expert_recv_stats,
+        recipe, activation, fast_math,
+        situ_beta, situ_linear_beta
+    )
+
+
+def fp8_fp4_mega_moe_bf16_shared_sp_rs(
+        y: torch.Tensor,
+        l1_weights: Tuple[torch.Tensor, torch.Tensor],
+        l2_weights: Tuple[torch.Tensor, torch.Tensor],
+        shared_x: torch.Tensor,
+        shared_l1_weights: torch.Tensor,
+        shared_l2_weights: torch.Tensor,
+        rms_weight: torch.Tensor,
+        rms_epsilon: float,
+        shared_rs_workspace: torch.Tensor,
+        shared_rs_flags: torch.Tensor,
+        shared_rs_peer_ptrs: torch.Tensor,
+        sym_buffer: SymmBuffer,
+        cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
+        recipe: Tuple[int, int, int] = (1, 1, 32),
+        activation: str = 'situ',
+        fast_math: bool = True,
+        situ_beta: Optional[float] = None,
+        situ_linear_beta: Optional[float] = None):
+    """Publish TP partials to the owning sequence-parallel token rank."""
+    _fp8_fp4_mega_moe_bf16_shared(
+        y, None,
+        l1_weights, l2_weights,
+        shared_x, shared_l1_weights, shared_l2_weights,
+        rms_weight, rms_epsilon,
+        sym_buffer,
+        shared_rs_workspace, shared_rs_flags, shared_rs_peer_ptrs, True,
         cumulative_local_expert_recv_stats,
         recipe, activation, fast_math,
         situ_beta, situ_linear_beta

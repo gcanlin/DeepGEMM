@@ -28,7 +28,8 @@ public:
         bool use_situ;
         float situ_beta, situ_linear_beta;
         int shared_hidden, shared_intermediate_hidden;
-        bool use_bf16_shared, apply_rms_norm, publish_shared_rs;
+        bool use_bf16_shared, apply_rms_norm;
+        bool publish_shared_rs, publish_shared_sp_rs;
         MegaMoEConfig config;
 
         // Runtime arguments
@@ -40,6 +41,7 @@ public:
         float rms_epsilon;
         int* cumulative_local_expert_recv_stats;
         int num_tokens;
+        int num_shared_tokens;
         layout::SymBuffer<> sym_buffer_ptrs;
 
         // Tensormap
@@ -93,7 +95,7 @@ static void __instantiate_kernel() {{
         {},
         {},
         {}, {},
-        {}, {}, {}
+        {}, {}, {}, {}
     >);
 }};
 )", args.num_max_tokens_per_rank,
@@ -116,7 +118,8 @@ static void __instantiate_kernel() {{
     args.shared_hidden, args.shared_intermediate_hidden,
     args.use_bf16_shared ? "true" : "false",
     args.apply_rms_norm ? "true" : "false",
-    args.publish_shared_rs ? "true" : "false");
+    args.publish_shared_rs ? "true" : "false",
+    args.publish_shared_sp_rs ? "true" : "false");
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -130,6 +133,7 @@ static void __instantiate_kernel() {{
             args.rms_epsilon,
             args.cumulative_local_expert_recv_stats,
             args.num_tokens,
+            args.num_shared_tokens,
             args.sym_buffer_ptrs,
             args.tensor_map_l1_acts,
             args.tensor_map_l1_acts_sf,
@@ -186,7 +190,8 @@ static void sm100_fp8_fp4_mega_moe(
     const bool& apply_rms_norm = false,
     const torch::Tensor& shared_rs_flags = torch::Tensor(),
     const torch::Tensor& shared_rs_peer_ptrs = torch::Tensor(),
-    const bool& publish_shared_rs = false
+    const bool& publish_shared_rs = false,
+    const bool& publish_shared_sp_rs = false
 ) {
     const auto num_ranks = static_cast<int>(sym_buffer_ptrs.size());
     const auto num_experts = num_experts_per_rank * num_ranks;
@@ -197,6 +202,8 @@ static void sm100_fp8_fp4_mega_moe(
     const auto shared_intermediate_hidden = use_bf16_shared ?
         static_cast<int>(bf16_shared_l2_acts.size(1)) :
         intermediate_hidden * num_shared_experts;
+    const auto num_shared_tokens = use_bf16_shared ?
+        static_cast<int>(bf16_shared_l1_acts.size(0)) : num_tokens;
 
     // Heuristics
     const auto config = get_mega_moe_config(
@@ -260,14 +267,14 @@ static void sm100_fp8_fp4_mega_moe(
     // BF16 shared tiles use half of routed K so that their two-byte elements
     // fit the existing FP8/expanded-FP4 shared-memory tiles.
     const auto shared_block_k = use_bf16_shared ? config.block_k / 2 : config.block_k;
-    const auto has_shared_work = num_shared_experts > 0 and num_tokens > 0;
+    const auto has_shared_work = num_shared_experts > 0 and num_shared_tokens > 0;
     const auto& actual_shared_l1_acts = use_bf16_shared ? bf16_shared_l1_acts : shared_l1_acts;
     const auto& actual_shared_l2_acts = use_bf16_shared ? bf16_shared_l2_acts : shared_l2_acts;
     const auto& actual_shared_l1_weights = use_bf16_shared ? bf16_shared_l1_weights : shared_l1_weights;
     const auto& actual_shared_l2_weights = use_bf16_shared ? bf16_shared_l2_weights : shared_l2_weights;
     const auto tensor_map_shared_l1_acts = has_shared_work ? make_tma_2d_desc(
         actual_shared_l1_acts,
-        shared_hidden, use_bf16_shared ? num_tokens : num_max_tokens_per_rank,
+        shared_hidden, use_bf16_shared ? num_shared_tokens : num_max_tokens_per_rank,
         shared_block_k, config.load_block_m,
         static_cast<int>(actual_shared_l1_acts.stride(-2)),
         config.swizzle_acts_mode) : tensor_map_l1_acts;
@@ -343,6 +350,7 @@ static void sm100_fp8_fp4_mega_moe(
         .use_bf16_shared = use_bf16_shared,
         .apply_rms_norm = apply_rms_norm,
         .publish_shared_rs = publish_shared_rs,
+        .publish_shared_sp_rs = publish_shared_sp_rs,
         .config = config,
         .y = y.data_ptr(),
         .shared_y = use_bf16_shared and not publish_shared_rs ? bf16_shared_y.data_ptr() : nullptr,
@@ -354,6 +362,7 @@ static void sm100_fp8_fp4_mega_moe(
         .rms_epsilon = rms_epsilon,
         .cumulative_local_expert_recv_stats = cumulative_local_expert_recv_stats_ptr,
         .num_tokens = num_tokens,
+        .num_shared_tokens = num_shared_tokens,
         .sym_buffer_ptrs = layout::SymBuffer<>(sym_buffer_ptrs, rank_idx),
         .tensor_map_l1_acts = tensor_map_l1_acts,
         .tensor_map_l1_acts_sf = tensor_map_l1_acts_sf,
